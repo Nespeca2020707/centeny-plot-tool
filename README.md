@@ -43,7 +43,7 @@ Clone and set up environment:
 
 ```bash
 git clone https://github.com/GiuntaLab/centeny-plot-tool.git
-cd CPT
+cd centeny-plot-tool
 conda env create -f envs/centeny_r.yaml
 conda activate centeny_plot
 ```
