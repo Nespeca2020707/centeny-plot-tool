@@ -1,0 +1,149 @@
+# =============================================================================
+#  CenTeny Karyotype Plot — Snakemake Configuration
+# =============================================================================
+
+workdir: "/path/to/your/workdir"
+
+# Cytoband file — defines the ideogram banding
+cytoband: "/path/to/your_species_cytobands.bed"
+
+# Sample sheet: 2 or 3 tab-separated columns, no header:
+#   label <TAB> bed_path <TAB> model   (model is optional)
+# where <model> is one of: centeny | model1 | model2 | model3 | auto (default).
+sample_sheet: "samples.tsv"
+
+# ----------------------------------------------------------------------------
+#  OUTPUT FORMAT
+#  -------------
+#  The script's own default is "html" (interactive canvas view)
+# ----------------------------------------------------------------------------
+output_format: "pdf"              # "html" | "pdf" | "svg" | "png" | "tiff"
+output_file:   "centeny_plot.pdf" # base name; "_<group>.<ext>" is appended per model group
+
+# ----------------------------------------------------------------------------
+#  DIMENSIONS
+#  ----------
+#  pdf / svg : values are in INCHES
+#              Landscape 20 x 13 inches is recommended for 24 chromosomes
+#              on a single printed page — gives enough horizontal space for
+#              all chromosomes while keeping the figure tall enough to
+#              distinguish annotation tracks.
+#
+#  jpeg only : values are in PIXELS
+#              Use large values: 14400 x 9600 at 1200 DPI = 12 x 8 inches.
+# ----------------------------------------------------------------------------
+plot_width:  20     # inches (pdf/svg) or pixels (jpeg)
+plot_height: 13     # inches (pdf/svg) or pixels (jpeg)
+
+# JPEG-specific (ignored for pdf/svg)
+jpeg_res: 1200      # DPI 
+
+# ----------------------------------------------------------------------------
+#  FONT SIZES  
+# ----------------------------------------------------------------------------
+chr_cex:   0.9    # chromosome label size  
+label_cex: 0.45   # sample track label size 
+tick_cex:  0.5    # genomic coordinate axis number size (smaller = less crowded)
+
+# Tick marks
+major_tick_dist:  10000000   # 10 Mb
+minor_tick_dist:   5000000   #  5 Mb
+
+# Vertical gap between each chromosome ideogram and its feature track(s).
+# Increase for more breathing room between the ideogram bar and the ticks.
+ideogram_gap: 15
+
+# Also write the interactive HTML alongside output_format above (needed
+# here since output_format is "pdf", not "html" — this option is a no-op
+# when output_format is left at its own default of "html").
+# Set to "false" to get only the pdf.
+html: "true"
+
+# Hard cap on total features rendered in the interactive HTML per group
+# (summed across all chromosomes/samples). Above this, points are
+# uniformly randomly subsampled to keep the file small and the browser responsive.
+# Lower this if files are still too large; raise it if you need denser interactive views.
+html_max_points: 150000
+
+# ----------------------------------------------------------------------------
+#  COORDINATE MODE
+#  ----------------
+#  "bp"      : real genomic positions (default). Chromosomes plot at their
+#              true relative lengths as projected on the chosen cytoband.
+#  "percent" : every chromosome rescaled to 0-100% of its own length, using
+#              EACH SAMPLE'S OWN chromosome length (see genome_sizes below)
+# ----------------------------------------------------------------------------
+coord_mode: "bp"          # "bp" | "percent"
+
+# Required when coord_mode is "percent": TSV, no header, 2 columns per row:
+#   <sample_label>  <path_to_fai>
+# One row per distinct sample label in sample_sheet (a label repeated across
+# centeny/model1/model2/model3 rows only needs one entry — same genome).
+# <path_to_fai> is a `samtools faidx` index of that sample's own FASTA.
+genome_sizes: ""          # e.g. "genome_sizes.tsv" — required only for percent mode
+
+# ----------------------------------------------------------------------------
+#  OPTIONAL CLUSTERING ANALYSIS
+#  -----------------------------
+#  For every sample x chromosome, tabulates the proportion of features in
+#  each colour/category, then hierarchically clusters to reveal which
+#  chromosomes, within a sample and across different samples, share
+#  similar feature composition (same frequency and type of feature).
+#  Writes "<output>_<group>_clustering.pdf" (base-R heatmap+dendrogram,
+#  no extra dependency) and "<output>_<group>_clustering.html"
+#  (interactive version) per group.
+# ----------------------------------------------------------------------------
+cluster: "false"
+
+# ----------------------------------------------------------------------------
+#  CENP-B MOTIF MODEL BEDS
+#  -------------------------------
+#  Each row in samples.tsv can point to a plain centeny BED *or* a
+#  CENP-B-motif "model" BED (model1/model2/model3-style files). If the
+#  sample sheet's optional 3rd column is blank/"auto", the model is
+#  auto-detected per file from column 4:
+#    Model 1  col4 = "D<bp>"                  -> distance in bp
+#    Model 2  col4 = "M<n>"                   -> distance in monomer units
+#    Model 3  col4 = "#d1_d2_..._dk"          -> k-pattern of k distances
+#  "model" below is only a fallback for rows still marked "auto" after the
+#  sample sheet is read — leave it as "auto" for normal per-row detection.
+# ----------------------------------------------------------------------------
+model: "auto"              # "auto" | "1" | "2" | "3"
+
+# Model 3 only: if a k-pattern BED has a single colour throughout (not yet
+# colour-coded), auto-colour its N most abundant k-patterns and bucket the
+# rest as "Other".
+top_n_patterns: 10
+
+# Font size for the colour legend drawn whenever >1 colour is used.
+legend_cex: 0.6
+
+# Cap the legend at this many entries; the least abundant remaining colours
+# are collapsed into one "+ N more" entry so the legend never overflows.
+legend_max_entries: 30
+
+# ----------------------------------------------------------------------------
+#  OPTIONAL: MOTIF MODEL COMPOSITION REPORT
+#  ------------------------------------------
+#  Set motif_report_output to a base name to also build, purely from
+#  sample_sheet's BED data:
+#    whole_genome_motif_abundance.html    — per-model composition %, one
+#                                            bar per sample (haplotypes
+#                                            shown separately)
+#    <motif_report_output>_karyotypes.html — per-model karyotype grid
+#                                            (haplotypes of the same
+#                                            individual shown together as
+#                                            side-by-side bars), plus a
+#                                            collapsible per-model sample-
+#                                            similarity clustering heatmap
+#  Leave unset (or empty) to skip this report entirely.
+# ----------------------------------------------------------------------------
+motif_report_output: ""     # e.g. "motif_report" — leave empty to disable
+
+# Composition chart / karyotype grid: categories below this % of a model's
+# global total get folded into "Other" for readability.
+motif_composition_threshold: 0.5
+
+# Model 3 only: the N most abundant k-patterns (globally) get their own
+# category in the composition chart/karyotype grid; the rest -> "Other".
+motif_kpattern_top_n: 10
