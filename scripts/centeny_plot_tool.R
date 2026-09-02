@@ -11,7 +11,7 @@
 #      --sample_sheet  samples.tsv \
 #      --output        centeny_plot
 #
-#  OUTPUTS 
+#  OUTPUTS
 #  -------
 #  With the default --format html:
 #  1. <output>_<group>.html                     — interactive canvas viewer
@@ -20,7 +20,7 @@
 #
 #  With a static --format (tiff/png/svg/pdf):
 #  1. <output>_<group>.<fmt>                    — karyotype figure
-#  2. <output>_<group>.html                     — also written if --html true
+#  2. <output>_<group>.html                     — ALSO written if --html true
 #  3. <output>_<group>_metrics.tsv              — per-sample x per-chromosome metrics
 #  4. <output>_<group>_cross_sample_summary.tsv — cross-assembly comparison
 #  where <group> is one of: centeny, model1, model2, model3
@@ -290,6 +290,12 @@ load_centeny_bed <- function(path, label) {
   if (ncol(dt) < 9) stop("BED must be BED9.", call. = FALSE)
   dt$HEX <- sapply(dt$V9, rgb_to_hex)
   dt$V1  <- gsub("^chr", "", dt$V1, ignore.case = TRUE)
+  # Strip haplotype-resolved-assembly suffixes (e.g. "_hap1", "_hap2",
+  # "_pat"/"_paternal", "_mat"/"_maternal") so chromosome names match the
+  # plain "1".."22","X","Y" list used elsewhere in this script — T2T
+  # CHM13v2.0 is a haploid reference, so per-haplotype names won't match
+  # otherwise and those features would silently be dropped from the plot
+  # and metrics.
   dt$V1  <- gsub("_hap[0-9]+$|_(pat|mat)(ernal)?$", "", dt$V1,
                   ignore.case = TRUE)
   dt
@@ -316,7 +322,7 @@ pick_legend_row_window <- function(chr_lengths, chromosomes, span = 5) {
 }
 
 # -----------------------------------------------------------------------
-#  Model detection & colour-legend helpers
+#  Model detection & colour-legend helpers (v2.0)
 # -----------------------------------------------------------------------
 
 MODEL_LOOKUP <- c("1" = "distance_bp", "2" = "monomer", "3" = "kpattern")
@@ -520,7 +526,7 @@ cap_legend_entries <- function(legend_df, max_entries = 30) {
 }
 
 # -----------------------------------------------------------------------
-#  Interactive HTML builder
+#  Interactive HTML builder — zero-dependency <canvas> viewer
 #  ------------------------------------------------------------------------
 
 base64_encode_raw <- function(raw_bytes) {
@@ -1042,6 +1048,8 @@ function redraw(state) {
   invisible(html_path)
 }
 
+
+
 prepare_model_and_legend <- function(dt, forced_model = "auto",
                                       top_n_patterns = 10) {
   model <- if (forced_model == "auto") detect_model_type(dt$V4) else forced_model
@@ -1079,20 +1087,9 @@ kpAddBaseNumbers_manual <- function(kp, chr, chr_length,
 }
 
 # -----------------------------------------------------------------------
-#  Optional clustering analysis: heatmap + dendrogram
+#  Optional clustering analysis: heatmap + dendrogram (PDF and HTML)
 #  ------------------------------------------------------------------------
-#  For every (sample, chromosome) pair in a group, tabulates what
-#  proportion of its features fall into each legend colour/category, then
-#  hierarchically clusters those rows to see which chromosomes — within a
-#  sample and across different samples — share similar feature
-#  composition (same frequency and type of feature). Opt-in via
-#  --cluster true. Zero extra dependencies: hclust/heatmap() are base R.
-# -----------------------------------------------------------------------
 
-# Computes (leaf-position, height) line segments for a dendrogram from an
-# hclust object — the same layout base R's plot.hclust uses internally —
-# so both the PDF (via heatmap()) and the hand-built HTML viewer draw the
-# exact same tree without re-implementing clustering logic in JS.
 compute_dendrogram_segments <- function(hc) {
   n <- length(hc$order)
   leaf_pos <- setNames(seq_len(n), as.character(hc$order))
@@ -1117,10 +1114,6 @@ compute_dendrogram_segments <- function(hc) {
   list(segments = segs, order = hc$order, max_height = max(hc$height), n = n)
 }
 
-# Self-contained heatmap + dendrogram HTML viewer: dendrogram on the left
-# (pre-computed segments, drawn on canvas), heatmap grid on the right
-# (cell colour = proportion), hover tooltip with the exact value. Same
-# zero-dependency canvas approach as the main interactive plot.
 build_clustering_html <- function(mat, hc, group_friendly, html_path, row_colours = NULL) {
   dendro   <- compute_dendrogram_segments(hc)
   ordered  <- mat[hc$order, , drop = FALSE]
@@ -1136,13 +1129,11 @@ build_clustering_html <- function(mat, hc, group_friendly, html_path, row_colour
                       sprintf("[%.4f,%.4f,%.4f,%.4f]", s[1], s[2], s[3], s[4]),
                       character(1)), collapse = ","), "]")
 
-  # Fixed, generous per-row height (doesn't shrink to squeeze into a fixed
-  # budget any more) so rows stay readable regardless of how many there
-  # are — the container scrolls instead.
-  row_h  <- max(15, min(24, round(3000 / n_rows)))
+  row_h  <- 18
   cell_w <- max(14, min(46, round(900 / n_cols)))
   dendro_w <- 160
   chr_strip_w <- 10
+  viewport_h <- 700
 
   html <- paste0(
 '<!DOCTYPE html><html><head><meta charset="utf-8"><title>', group_friendly, ' - clustering</title>
@@ -1151,15 +1142,16 @@ build_clustering_html <- function(mat, hc, group_friendly, html_path, row_colour
   #page{padding:14px;}
   h1{font-size:15px;margin:2px 0 10px 2px;}
   #wrap{overflow:auto;border:1px solid #eee;}
-  canvas{display:block;}
+  canvas{display:block;position:sticky;top:0;left:0;}
+  #spacer{position:relative;}
   #tooltip{position:fixed;pointer-events:none;background:rgba(20,20,20,0.92);color:#fff;
            font-size:11px;padding:4px 7px;border-radius:4px;display:none;z-index:20;white-space:nowrap;}
   #hint{color:#888;font-size:11px;margin-top:6px;}
 </style></head><body>
 <div id="page">
 <h1>', group_friendly, ' - chromosome pattern clustering</h1>
-<div id="wrap"><canvas id="cv"></canvas></div>
-<div id="hint">rows: sample | chromosome (coloured strip = chromosome identity) &middot; columns: feature category &middot; hover a cell for its exact proportion</div>
+<div id="wrap"><div id="spacer"><canvas id="cv"></canvas></div></div>
+<div id="hint">rows: sample | chromosome (coloured strip = chromosome identity) &middot; columns: feature category &middot; hover a cell for its exact proportion &middot; scroll to see all rows</div>
 </div>
 <div id="tooltip"></div>
 <script>
@@ -1172,18 +1164,26 @@ var VALS = ', values_js, ';   // row-major, length ROWS.length * COLS.length
 var SEGS = ', seg_js, ';      // [pos0,height0,pos1,height1] per dendrogram line
 var MAXH = ', dendro$max_height, ';
 var ROW_H = ', row_h, ', CELL_W = ', cell_w, ', DENDRO_W = ', dendro_w, ', CHR_STRIP_W = ', chr_strip_w, ';
-var LABEL_W = 210, HEADER_H = 90;
+var LABEL_W = 210, HEADER_H = 90, VIEWPORT_H = ', viewport_h, ';
 
 var nRows = ROWS.length, nCols = COLS.length;
+var wrap = document.getElementById("wrap");
+var spacer = document.getElementById("spacer");
 var canvas = document.getElementById("cv");
 var ctx = canvas.getContext("2d");
-var totalW = LABEL_W + CHR_STRIP_W + DENDRO_W + nCols * CELL_W + 20;
-var totalH = HEADER_H + nRows * ROW_H + 10;
+var gx0 = LABEL_W + CHR_STRIP_W + DENDRO_W;
+var totalW = gx0 + nCols * CELL_W + 20;
+var totalContentH = HEADER_H + nRows * ROW_H + 10;
+var canvasH = Math.min(VIEWPORT_H, totalContentH);
 var dpr = window.devicePixelRatio || 1;
+
+wrap.style.height = canvasH + "px";
+spacer.style.width = totalW + "px";
+spacer.style.height = totalContentH + "px";
 canvas.style.width = totalW + "px";
-canvas.style.height = totalH + "px";
+canvas.style.height = canvasH + "px";
 canvas.width = Math.round(totalW * dpr);
-canvas.height = Math.round(totalH * dpr);
+canvas.height = Math.round(canvasH * dpr);
 ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
 function val(r, c) { return VALS[r * nCols + c]; }
@@ -1205,30 +1205,44 @@ function colour(v) {
 }
 
 function heightToX(h) { return DENDRO_W - (h / (MAXH || 1)) * (DENDRO_W - 8); }
-function posToY(p) { return HEADER_H + (p - 0.5) * ROW_H; }
+// content-space Y (0 at the top of row 0) — the scroll offset is applied
+// separately at draw time, not baked into this, so the same math works
+// whether or not the page has scrolled.
+function posToYContent(p) { return (p - 0.5) * ROW_H; }
 
 function draw() {
-  ctx.clearRect(0, 0, totalW, totalH);
+  var scrollTop = wrap.scrollTop;
+  ctx.clearRect(0, 0, totalW, canvasH);
 
-  // dendrogram
+  // scrolling content region (dendrogram, colour strip, row labels, cells)
+  // clipped below the header so it never draws over the fixed column
+  // headers, and only the rows currently in view are iterated — this is
+  // what keeps performance (and canvas size) independent of row count.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, HEADER_H, totalW, canvasH - HEADER_H);
+  ctx.clip();
+
   ctx.strokeStyle = "#666"; ctx.lineWidth = 1;
   SEGS.forEach(function(s) {
+    var y0 = HEADER_H + posToYContent(s[0]) - scrollTop;
+    var y1 = HEADER_H + posToYContent(s[2]) - scrollTop;
     ctx.beginPath();
-    ctx.moveTo(LABEL_W + CHR_STRIP_W + heightToX(s[1]), posToY(s[0]));
-    ctx.lineTo(LABEL_W + CHR_STRIP_W + heightToX(s[3]), posToY(s[2]));
+    ctx.moveTo(LABEL_W + CHR_STRIP_W + heightToX(s[1]), y0);
+    ctx.lineTo(LABEL_W + CHR_STRIP_W + heightToX(s[3]), y1);
     ctx.stroke();
   });
 
-  // per-row chromosome-identity colour strip + matching label text colour
-  for (var r = 0; r < nRows; r++) {
-    ctx.fillStyle = ROW_COLOURS[r];
-    ctx.fillRect(LABEL_W, HEADER_H + r * ROW_H, CHR_STRIP_W - 2, ROW_H - 2);
-  }
+  var visStart = Math.max(0, Math.floor(scrollTop / ROW_H) - 2);
+  var visEnd   = Math.min(nRows, Math.ceil((scrollTop + (canvasH - HEADER_H)) / ROW_H) + 2);
 
-  // row labels
-  ctx.font = "9px sans-serif"; ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  for (var r = 0; r < nRows; r++) {
+  ctx.font = "9px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  for (var r = visStart; r < visEnd; r++) {
+    var y = HEADER_H + r * ROW_H - scrollTop;
+
+    ctx.fillStyle = ROW_COLOURS[r];
+    ctx.fillRect(LABEL_W, y, CHR_STRIP_W - 2, ROW_H - 2);
+
     var label = ROWS[r];
     if (ctx.measureText(label).width > LABEL_W - 8) {
       while (label.length > 1 && ctx.measureText(label + "\u2026").width > LABEL_W - 8) {
@@ -1237,45 +1251,45 @@ function draw() {
       label += "\u2026";
     }
     ctx.fillStyle = ROW_COLOURS[r];
-    ctx.fillText(label, 2, HEADER_H + r * ROW_H + ROW_H / 2);
-  }
+    ctx.fillText(label, 2, y + ROW_H / 2);
 
-  // column headers (rotated)
+    for (var c = 0; c < nCols; c++) {
+      ctx.fillStyle = colour(val(r, c));
+      ctx.fillRect(gx0 + c * CELL_W, y, CELL_W - 1, ROW_H - 2);
+    }
+  }
+  ctx.restore();
+
+  // column headers (rotated) — fixed, always drawn last so they sit on
+  // top of any scrolled content and never move with the row scroll.
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, totalW, HEADER_H);
   ctx.save();
   ctx.font = "9px sans-serif"; ctx.fillStyle = "#222";
-  var gx0 = LABEL_W + CHR_STRIP_W + DENDRO_W;
-  for (var c = 0; c < nCols; c++) {
-    var cx = gx0 + c * CELL_W + CELL_W / 2;
+  for (var c2 = 0; c2 < nCols; c2++) {
+    var cx = gx0 + c2 * CELL_W + CELL_W / 2;
     ctx.save();
     ctx.translate(cx, HEADER_H - 6);
     ctx.rotate(-Math.PI / 3);
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    var label = COLS[c];
-    if (label.length > 26) label = label.slice(0, 25) + "\u2026";
-    ctx.fillText(label, 0, 0);
+    var label2 = COLS[c2];
+    if (label2.length > 26) label2 = label2.slice(0, 25) + "\u2026";
+    ctx.fillText(label2, 0, 0);
     ctx.restore();
   }
   ctx.restore();
-
-  // heatmap grid — a slightly larger inset than before so the extra row
-  // height reads as clear spacing between rows, not just bigger cells
-  for (var r = 0; r < nRows; r++) {
-    for (var c = 0; c < nCols; c++) {
-      ctx.fillStyle = colour(val(r, c));
-      ctx.fillRect(gx0 + c * CELL_W, HEADER_H + r * ROW_H, CELL_W - 1, ROW_H - 2);
-    }
-  }
 }
 draw();
+wrap.addEventListener("scroll", draw);
+window.addEventListener("resize", draw);
 
 var tooltip = document.getElementById("tooltip");
 canvas.addEventListener("mousemove", function(e) {
   var rect = canvas.getBoundingClientRect();
   var mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  var gx0 = LABEL_W + CHR_STRIP_W + DENDRO_W;
   if (mx < gx0 || my < HEADER_H) { tooltip.style.display = "none"; return; }
   var c = Math.floor((mx - gx0) / CELL_W);
-  var r = Math.floor((my - HEADER_H) / ROW_H);
+  var r = Math.floor((my - HEADER_H + wrap.scrollTop) / ROW_H);
   if (c < 0 || c >= nCols || r < 0 || r >= nRows) { tooltip.style.display = "none"; return; }
   tooltip.style.display = "block";
   tooltip.style.left = (e.clientX + 12) + "px";
@@ -1363,10 +1377,7 @@ run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
 
   row_colours <- unname(chr_palette[row_chr])
 
-  # ---- PDF: base-R heatmap(), zero extra dependency -----------------------
-  # White is reserved for exact zero ("no features of this category on
-  # this chromosome") — everything above zero starts at a clearly visible
-  # light blue
+  # ---- PDF: base-R heatmap() -----------------------
   n_ramp   <- 63
   col_vec  <- c("#FFFFFF", colorRampPalette(c("#D6EAF8", "#4C72B0", "#08306B"))(n_ramp))
   mx       <- max(mat, na.rm = TRUE)
@@ -1374,15 +1385,22 @@ run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
   breaks   <- c(-1, 0, seq(mx / n_ramp, mx, length.out = n_ramp))
 
   pdf_path <- paste0(out_base_grp, "_clustering.pdf")
-  pdf_h <- max(6, 0.26 * nrow(mat) + 3)
-  pdf_w <- max(8, 0.30 * ncol(mat) + 9)
+  pdf_h_uncapped <- 0.26 * nrow(mat) + 3
+  pdf_h <- max(6, min(60, pdf_h_uncapped))
+  pdf_w <- max(8, min(60, 0.30 * ncol(mat) + 9))
+  if (pdf_h_uncapped > 60) {
+    cat(sprintf(paste0("  NOTE: %d rows would need a %.0f-inch-tall page at full spacing; ",
+                        "capping at 60in so the PDF stays valid. Use the interactive ",
+                        "_clustering.html for full per-row detail at this scale.\n"),
+                nrow(mat), pdf_h_uncapped))
+  }
   pdf(pdf_path, width = pdf_w, height = pdf_h)
   tryCatch({
     heatmap(mat, Rowv = as.dendrogram(hc), Colv = NA, scale = "none",
             col = col_vec, breaks = breaks,
             RowSideColors = row_colours,
             margins = c(10, 14),
-            cexRow = max(0.25, min(0.9, 30 / nrow(mat))),
+            cexRow = max(0.05, min(0.9, 30 / nrow(mat))),
             cexCol = max(0.4, min(0.8, 25 / ncol(mat))),
             main = paste0(group_friendly, "\nChromosome pattern clustering"))
   }, error = function(e) {
@@ -1391,6 +1409,7 @@ run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
   dev.off()
   cat(sprintf("  Clustering heatmap (PDF)  -> %s\n", pdf_path))
 
+  # ---- HTML: same hclust result, hand-drawn dendrogram + heatmap grid -----
   html_path <- paste0(out_base_grp, "_clustering.html")
   build_clustering_html(mat, hc, group_friendly, html_path, row_colours = row_colours)
   cat(sprintf("  Clustering heatmap (HTML) -> %s\n", html_path))
@@ -1414,7 +1433,6 @@ load_genome_from_cytobands <- function(path) {
   lens <- cb[, .(len = max(end)), by = chr]
   chr_lengths <- setNames(as.numeric(lens$len), lens$chr)
 
-  # Natural sort: numeric chromosome names ascending first (1,2,...,22,23)
   nm     <- names(chr_lengths)
   is_num <- grepl("^[0-9]+$", nm)
   ord    <- c(nm[is_num][order(as.integer(nm[is_num]))], sort(nm[!is_num]))
@@ -1444,8 +1462,6 @@ bed_list <- lapply(seq_len(nrow(sample_df)), function(i) {
 })
 names(bed_list) <- sample_df$row_id
 
-# Guard against chromosomes present in a BED file but absent from the
-# cytoband-derived genome
 cat("Validating chromosome names against the cytoband-derived genome...\n")
 any_dropped <- FALSE
 for (idx in seq_len(nrow(sample_df))) {
@@ -1474,6 +1490,7 @@ if (any_dropped) {
 }
 
 # ---- per-sample chromosome lengths (percent mode only) --------------------
+
 sample_chr_lengths <- list()
 if (opt$coord_mode == "percent") {
   cat("Loading per-sample genome sizes:", opt$genome_sizes, "\n")
@@ -1532,9 +1549,6 @@ if (opt$coord_mode == "percent") {
   }
   cat(sprintf("  Loaded chromosome lengths for %d sample(s)\n", length(sample_chr_lengths)))
 
-  # A sample's own .fai might legitimately not cover every chromosome the
-  # BED references (e.g. no assembled Y) — drop those rows with a clear
-  # warning rather
   cat("Validating chromosome names against each sample's own --genome_sizes...\n")
   any_dropped_gs <- FALSE
   for (idx in seq_len(nrow(sample_df))) {
@@ -1568,6 +1582,8 @@ for (idx in seq_len(nrow(sample_df))) {
   rid        <- sample_df$row_id[idx]
   lbl        <- sample_df$label[idx]
   row_forced <- sample_df$model_tag[idx]
+  # a row left as "auto" in the sample sheet can still be forced globally
+  # via --model; an explicit 3rd-column tag always takes precedence
   if (row_forced == "auto" && opt$model != "auto") {
     row_forced <- MODEL_LOOKUP[[opt$model]]
   }
@@ -1645,10 +1661,6 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
   cap_placeholder_colour  <- legend_df$placeholder_colour
   legend_df <- legend_df$legend_df
 
-  # cap_legend_entries() only shrinks the DISPLAYED legend — the features
-  # themselves still carry their real original colours. Without this,
-  # every capped-out category's points keep rendering in their own
-  # distinct colour that no longer appears anywhere in the legend.
   if (length(cap_dropped_colours) > 0) {
     for (rid in names(grp_bed_list)) {
       dt  <- grp_bed_list[[rid]]
@@ -1673,7 +1685,6 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
   }
 
   # ---- coordinate mode (bp vs percent) -------------------------------------
-  # Percent mode rescales every chromosome to 0-100% of its own length
   percent_mode <- identical(opt$coord_mode, "percent")
 
   rescale_to_percent <- function(start, end, chr, chr_lengths) {
@@ -1719,11 +1730,7 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
   pp$bottommargin   <- 20
   pp$leftmargin     <- 0.25
   pp$rightmargin    <- 0.01
-  # dedicated gap between each ideogram and its feature track(s)
   pp$data1inmargin  <- opt$ideogram_gap
-  # Track (sample) label font auto-shrinks as more tracks are stacked into
-  # the same row, so names like "RPE1_hap1" stop overlapping each other
-  # once there are a dozen-plus samples.
   label_scale <- min(1, 9 / n_tracks)
 
   if (!is.null(opt$chromosome)) {
@@ -1776,7 +1783,8 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
     }
   }
 
-   draw_once <- function() {
+  # ---- one draw pass ---------------------
+  draw_once <- function() {
     genome_lengths_plot <- if (percent_mode) {
       setNames(rep(100, length(chromosomes)), chromosomes)
     } else {
@@ -1873,7 +1881,7 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
   out_base_grp <- paste0(output_base, "_", group_tag)
   want_html <- (fmt == "html") || isTRUE(opt$html)
 
-  # ---- primary output (--format), unless format is html -------------------
+  # ---- primary output (--format), unless format IS html -------------------
   primary_path <- NA_character_
   if (fmt != "html") {
     primary_path <- paste0(out_base_grp, ".", fmt)
@@ -1898,7 +1906,7 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
     }
   }
 
-  # ---- interactive canvas HTML
+  # ---- interactive canvas HTML (real zoom/pan with live coordinates,
   html_path <- NA_character_
   if (want_html) {
     html_path <- paste0(out_base_grp, ".html")
@@ -2027,10 +2035,6 @@ for (gm in names(groups)) {
   grp_bed_list      <- bed_list[grp_sample_df$row_id]
   grp_legend_entries <- legend_entries[grp_sample_df$row_id]
   names(grp_bed_list) <- names(grp_legend_entries) <- grp_sample_df$row_id
-
-  # Model 3: recolour every not-yet-colour-coded file in this group
-  # TOGETHER (not one file at a time), so the same #hashID pattern gets
-  # the same colour everywhere
   recolor_rows <- intersect(grp_sample_df$row_id, pending_kpattern_recolor)
   if (length(recolor_rows) > 0) {
     rc <- apply_group_kpattern_colouring(grp_bed_list, recolor_rows,
