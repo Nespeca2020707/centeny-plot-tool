@@ -1,5 +1,10 @@
 # Centeny Plot Tool (CPT)
 
+> **Fork note.** This is a customised fork of
+> [GiuntaLab/centeny-plot-tool](https://github.com/GiuntaLab/centeny-plot-tool).
+> Changes are limited to the optional clustering analysis and are listed in
+> [Fork changes](#fork-changes); with default options the tool behaves like upstream.
+
 A karyotype-style visualization pipeline for centromeric/CENP-B motif annotation
 data across one or many genome assemblies. Renders stacked feature tracks
 against a chromosome ideogram, colour-codes features by category, and produces
@@ -236,6 +241,22 @@ Outputs both a static heatmap+dendrogram (`_clustering.pdf`) and an interactive 
 (`_clustering.html`). Non-informative categories (background/catch-all buckets, "+N more"
 overflow) are excluded from the analysis to focalize clustering.
 
+### Fork changes
+
+- Features whose colour is missing from the merged legend are dropped before
+  computing proportions. Upstream, a row left with no valid feature produced
+  `0/0 = NaN` and `hclust` stopped with an error.
+- `--cluster_level genome` clusters whole samples instead of sample × chromosome:
+  one row per sample, with the profile computed over all its chromosomes.
+  `--genome_profile pooled` (default) sums the counts of all chromosomes, so each
+  chromosome weighs as much as its number of features; `mean` averages the
+  per-chromosome profiles with equal weight. Output files get a `_genome` suffix.
+- `--cluster_min_boxes N` drops sample × chromosome units with `<= N` informative
+  features; `--cluster_exclude X,Y` leaves chromosomes out; `--cluster_method`
+  sets the `hclust` linkage (default `average`).
+- The clustering also writes `<output>_clustering_units.tsv`: informative features
+  per sample and chromosome, and whether each unit was used.
+
 ---
 
 ## Full CLI reference
@@ -265,6 +286,11 @@ overflow) are excluded from the analysis to focalize clustering.
 | `--coord_mode` | `bp` | `bp` \| `percent` (percent requires `--genome_sizes`) |
 | `--genome_sizes` | — | Required for percent mode; see [Input files](#input-files) |
 | `--cluster` | `false` | Run the optional clustering analysis |
+| `--cluster_level` | `chromosome` | *(fork)* `chromosome` \| `genome` — clustering unit |
+| `--genome_profile` | `pooled` | *(fork)* `pooled` \| `mean` — how chromosomes are combined with `--cluster_level genome` |
+| `--cluster_min_boxes` | `0` | *(fork)* Drop units with `<= N` informative features |
+| `--cluster_exclude` | — | *(fork)* Comma-separated chromosomes left out of the clustering |
+| `--cluster_method` | `average` | *(fork)* `hclust` linkage method |
 
 Run `Rscript scripts/centeny_plot_tool.R --help` at any time for this same list
 

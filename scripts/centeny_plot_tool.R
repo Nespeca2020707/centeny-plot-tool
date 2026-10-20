@@ -4,6 +4,16 @@
 #  Version: 1.0
 # =============================================================================
 #
+#  MODIFIED VERSION (fork Nespeca2020707/centeny-plot-tool of
+#  GiuntaLab/centeny-plot-tool, Apache License 2.0). Changes from upstream:
+#   - run_clustering_analysis(): boxes whose colour is not in the merged
+#     legend are dropped before computing proportions (previously a row with
+#     no valid box gave 0/0 = NaN and hclust failed);
+#   - new options --cluster_level (chromosome | genome), --genome_profile
+#     (pooled | mean), --cluster_min_boxes, --cluster_exclude and
+#     --cluster_method. Defaults reproduce the upstream behaviour;
+#   - the clustering also writes <output>_clustering_units.tsv.
+#
 #  USAGE
 #  -----
 #    Rscript centeny_plot_tool.R \
@@ -174,6 +184,32 @@ option_list <- list(
                   "Writes a heatmap+dendrogram as both PDF and interactive ",
                   "HTML. 'true'/'false' [default: false]")),
 
+  # --- fork additions: genome-level clustering and clustering controls ---
+  make_option(c("--cluster_level"), type = "character", default = "chromosome",
+    help = paste0("Clustering unit: 'chromosome' = one row per sample x ",
+                  "chromosome (original behaviour); 'genome' = one row per ",
+                  "sample, profile computed over all its chromosomes ",
+                  "[default: chromosome]")),
+
+  make_option(c("--genome_profile"), type = "character", default = "pooled",
+    help = paste0("Only with --cluster_level genome. 'pooled' = all boxes of ",
+                  "the sample counted together (chromosomes weighted by their ",
+                  "number of boxes); 'mean' = unweighted mean of the per-",
+                  "chromosome profiles [default: pooled]")),
+
+  make_option(c("--cluster_min_boxes"), type = "integer", default = 0,
+    help = paste0("Drop sample x chromosome units with <= N informative ",
+                  "(categorised, non-background) boxes before clustering; ",
+                  "0 = no filter [default: 0]")),
+
+  make_option(c("--cluster_exclude"), type = "character", default = "",
+    help = paste0("Comma-separated chromosomes left out of the clustering ",
+                  "(e.g. 'X,Y') [default: none]")),
+
+  make_option(c("--cluster_method"), type = "character", default = "average",
+    help = paste0("hclust linkage method (average = UPGMA, ward.D2, complete, ",
+                  "single, ...) [default: average]")),
+
   make_option(c("--html"), type = "character", default = "false",
     help = paste0("Also write the interactive HTML alongside a non-html ",
                   "--format (e.g. --format pdf --html true gets you both). ",
@@ -225,6 +261,19 @@ if (!is.null(opt$genome_sizes) && nzchar(opt$genome_sizes) && !file.exists(opt$g
   stop(paste0("--genome_sizes file not found: ", opt$genome_sizes), call. = FALSE)
 
 opt$cluster <- tolower(trimws(opt$cluster)) %in% c("true", "t", "yes", "y", "1")
+
+opt$cluster_level <- tolower(trimws(opt$cluster_level))
+if (!opt$cluster_level %in% c("chromosome", "genome"))
+  stop("--cluster_level must be one of: chromosome, genome", call. = FALSE)
+opt$genome_profile <- tolower(trimws(opt$genome_profile))
+if (!opt$genome_profile %in% c("pooled", "mean"))
+  stop("--genome_profile must be one of: pooled, mean", call. = FALSE)
+if (opt$cluster_min_boxes < 0) stop("--cluster_min_boxes must be >= 0", call. = FALSE)
+opt$cluster_exclude <- gsub("^chr", "", trimws(strsplit(opt$cluster_exclude, ",")[[1]]), ignore.case = TRUE)
+opt$cluster_exclude <- opt$cluster_exclude[nzchar(opt$cluster_exclude)]
+if (!opt$cluster_method %in% c("ward.D", "ward.D2", "single", "complete", "average",
+                               "mcquitty", "median", "centroid"))
+  stop("--cluster_method must be a valid hclust method (e.g. average, ward.D2)", call. = FALSE)
 
 # =============================================================================
 #  3.  PARSE SAMPLE SHEET
@@ -1307,7 +1356,10 @@ canvas.addEventListener("mouseleave", function() { tooltip.style.display = "none
 }
 
 run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
-                                     legend_df, group_friendly, out_base_grp) {
+                                     legend_df, group_friendly, out_base_grp,
+                                     level = "chromosome", profile = "pooled",
+                                     min_boxes = 0, exclude = character(0),
+                                     method = "average") {
   if (is.null(legend_df) || nrow(legend_df) < 2) {
     cat("  Skipping clustering: fewer than 2 colour categories in this group.\n")
     return(invisible(NULL))
@@ -1337,28 +1389,63 @@ run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
   hues  <- ((seq_len(n_chr) - 1) * 137.508) %% 360
   chr_palette <- setNames(grDevices::hcl(h = hues, c = 80, l = 55), chromosomes)
 
+  # --- fork: clustering unit = chromosome or whole genome ---
+  # For every sample, informative features are counted per category on each chromosome
+  # (same rule as before: colour -> category, background/noise dropped). Then:
+  #   level = "chromosome": one row per sample x chromosome (upstream behaviour)
+  #   level = "genome":     one row per sample;
+  #       profile = "pooled" -> counts summed over all chromosomes, then proportions
+  #       profile = "mean"   -> unweighted mean of the per-chromosome profiles
+  # min_boxes: drop chromosomes with <= min_boxes informative features; exclude: skipped chromosomes.
+  chrs_use <- setdiff(chromosomes, exclude)
+  if (length(exclude) > 0)
+    cat(sprintf("  Clustering: excluding chromosome(s) %s\n", paste(intersect(exclude, chromosomes), collapse = ", ")))
+
   rows <- list()
   row_names <- character(0)
   row_chr   <- character(0)
+  units_log <- list()
   for (i in seq_len(nrow(grp_sample_df))) {
     lbl <- grp_sample_df$label[i]
     dat <- grp_bed_list[[grp_sample_df$row_id[i]]]
-    for (chr in chromosomes) {
+    tabs <- list()
+    for (chr in chrs_use) {
       sub <- dat[dat$V1 == chr, ]
       if (nrow(sub) == 0) next
       cat_lab <- unname(hex_to_cat[sub$HEX])
       cat_lab[is.na(cat_lab)] <- "(uncategorised)"
-      cat_lab <- cat_lab[!(cat_lab %in% noise_cats)]
-      if (length(cat_lab) == 0) next  # nothing informative left on this chromosome
-      tab  <- table(factor(cat_lab, levels = cats_keep))
-      prop <- as.numeric(tab) / sum(tab)
+      # colours absent from the merged legend are never in cats_keep: drop them
+      # too, otherwise an all-uncategorised row gives 0/0 = NaN and hclust fails
+      cat_lab <- cat_lab[cat_lab %in% cats_keep]
+      used <- length(cat_lab) > 0 && length(cat_lab) > min_boxes
+      units_log[[length(units_log) + 1]] <- data.frame(sample = lbl, chromosome = chr,
+        informative_boxes = length(cat_lab), used = used, stringsAsFactors = FALSE)
+      if (!used) next  # nothing informative left on this chromosome (or below --cluster_min_boxes)
+      tabs[[chr]] <- as.numeric(table(factor(cat_lab, levels = cats_keep)))
+    }
+    if (length(tabs) == 0) next
+    if (level == "chromosome") {
+      for (chr in names(tabs)) {
+        rows[[length(rows) + 1]] <- tabs[[chr]] / sum(tabs[[chr]])
+        row_names <- c(row_names, paste0(lbl, " | chr", chr))
+        row_chr   <- c(row_chr, chr)
+      }
+    } else {
+      prop <- if (profile == "pooled") {
+        tot <- Reduce(`+`, tabs); tot / sum(tot)
+      } else {
+        colMeans(do.call(rbind, lapply(tabs, function(t) t / sum(t))))
+      }
       rows[[length(rows) + 1]] <- prop
-      row_names <- c(row_names, paste0(lbl, " | chr", chr))
-      row_chr   <- c(row_chr, chr)
+      row_names <- c(row_names, lbl)
+      row_chr   <- c(row_chr, "genome")
+      cat(sprintf("  Clustering: %-14s genome profile from %d chromosome(s), %d informative boxes\n",
+                  lbl, length(tabs), as.integer(sum(sapply(tabs, sum)))))
     }
   }
+  unit_word <- if (level == "genome") "sample (genome)" else "sample x chromosome"
   if (length(rows) < 3) {
-    cat("  Skipping clustering: fewer than 3 sample x chromosome rows with data.\n")
+    cat(sprintf("  Skipping clustering: fewer than 3 %s rows with data.\n", unit_word))
     return(invisible(NULL))
   }
 
@@ -1373,9 +1460,24 @@ run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
   }
 
   d  <- dist(mat, method = "euclidean")
-  hc <- hclust(d, method = "average")
+  hc <- hclust(d, method = method)
 
-  row_colours <- unname(chr_palette[row_chr])
+  if (level == "genome") {
+    # one row per sample: the side bar colours samples, not chromosomes
+    s_hues <- ((seq_along(row_names) - 1) * 137.508) %% 360
+    row_colours <- grDevices::hcl(h = s_hues, c = 80, l = 55)
+    out_base_grp <- paste0(out_base_grp, "_genome")
+  } else {
+    row_colours <- unname(chr_palette[row_chr])
+  }
+  units_path <- paste0(out_base_grp, "_clustering_units.tsv")
+  fwrite(do.call(rbind, units_log), units_path, sep = "\t", quote = FALSE)
+  cat(sprintf("  Clustering units (TSV)    -> %s\n", units_path))
+  plot_title <- if (level == "genome") {
+    sprintf("Genome pattern clustering (%s profile, %s linkage)", profile, method)
+  } else {
+    sprintf("Chromosome pattern clustering (%s linkage)", method)
+  }
 
   # ---- PDF: base-R heatmap() -----------------------
   n_ramp   <- 63
@@ -1402,7 +1504,7 @@ run_clustering_analysis <- function(grp_sample_df, grp_bed_list, chromosomes,
             margins = c(10, 14),
             cexRow = max(0.05, min(0.9, 30 / nrow(mat))),
             cexCol = max(0.4, min(0.8, 25 / ncol(mat))),
-            main = paste0(group_friendly, "\nChromosome pattern clustering"))
+            main = paste0(group_friendly, "\n", plot_title))
   }, error = function(e) {
     cat("  NOTE: clustering heatmap PDF failed (", conditionMessage(e), ")\n", sep = "")
   })
@@ -2015,7 +2117,12 @@ render_group <- function(grp_sample_df, grp_bed_list, grp_legend_entries,
   cluster_out <- NULL
   if (isTRUE(opt$cluster)) {
     cluster_out <- run_clustering_analysis(grp_sample_df, grp_bed_list, chromosomes,
-                                            legend_df, group_friendly, out_base_grp)
+                                            legend_df, group_friendly, out_base_grp,
+                                            level     = opt$cluster_level,
+                                            profile   = opt$genome_profile,
+                                            min_boxes = opt$cluster_min_boxes,
+                                            exclude   = opt$cluster_exclude,
+                                            method    = opt$cluster_method)
   }
 
   list(plot = primary_path, html = html_path,
